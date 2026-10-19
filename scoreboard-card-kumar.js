@@ -83,7 +83,9 @@ class Qt extends Xt{constructor(t){if(super(t),this.it=L,t.type!==Kt)throw Error
    Tapping a scoreboard row fires browser_mod's ll-custom popup event with a
    tt-game-card configured from the row's ESPN event id. The detail card
    fetches ESPN's free summary API directly and re-fetches every 15s while
-   the game is live (stops once final). No extra HA sensors/integrations. */
+   the game is live (stops once final). Tabbed UI: Summary / Team Stats /
+   Players / Plays; the header (logos + score) stays visible, the selected
+   tab and scroll position survive live refreshes. No extra HA sensors. */
 document.addEventListener('click', (ev) => {
   try {
     const path = ev.composedPath ? ev.composedPath() : [];
@@ -99,9 +101,28 @@ document.addEventListener('click', (ev) => {
 });
 
 class TtGameCard extends HTMLElement {
-  setConfig(cfg) { this._cfg = cfg || {}; }
+  setConfig(cfg) {
+    cfg = cfg || {};
+    if (cfg.event_id !== this._eventId) {
+      this._eventId = cfg.event_id;
+      this._tab = 'summary';
+      this._loaded = false;
+      this._hash = null;
+      this._hasData = false;
+      this._data = null;
+    }
+    this._cfg = cfg;
+  }
   connectedCallback() {
-    if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
+    if (!this.shadowRoot) {
+      this.attachShadow({ mode: 'open' });
+      this.shadowRoot.addEventListener('click', (e) => {
+        const b = e.target && e.target.closest ? e.target.closest('[data-tab]') : null;
+        if (!b) return;
+        this._tab = b.getAttribute('data-tab');
+        if (this._data) this._render(this._data);
+      });
+    }
     if (!this._loaded) { this._loaded = true; this._renderShell('Loading game details…'); this._load(); }
     if (!this._timer) this._timer = setInterval(() => this._load(), 15000);
   }
@@ -113,7 +134,14 @@ class TtGameCard extends HTMLElement {
     try {
       const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${c.sport_path}/${c.league_path}/summary?event=${c.event_id}`);
       if (!res.ok) throw new Error('http ' + res.status);
-      const data = await res.json();
+      const text = await res.text();
+      let h = 0x811c9dc5;
+      for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+      const hash = (h >>> 0).toString(16) + ':' + text.length;
+      if (hash === this._hash && this._hasData) return; // unchanged: leave DOM, tab and scroll untouched
+      this._hash = hash;
+      const data = JSON.parse(text);
+      this._data = data;
       this._render(data);
       const st = data && data.header && data.header.competitions && data.header.competitions[0] &&
                  data.header.competitions[0].status && data.header.competitions[0].status.type &&
@@ -127,7 +155,23 @@ class TtGameCard extends HTMLElement {
   _renderShell(msg) {
     this.shadowRoot.innerHTML = `<style>${TtGameCard.CSS}</style><div class="wrap"><div class="msg">${this._esc(msg)}</div></div>`;
   }
+  _scroller() {
+    let el = this;
+    while (el && el !== document.body) {
+      el = el.parentElement || (el.getRootNode && el.getRootNode() ? el.getRootNode().host : null);
+      if (!el) break;
+      try {
+        const cs = getComputedStyle(el);
+        if (el.scrollHeight > el.clientHeight + 4 && /(auto|scroll)/.test(cs.overflowY)) return el;
+      } catch (e) { /* keep walking */ }
+    }
+    return null;
+  }
   _render(data) {
+    // Preserve scroll: popup scroller (ancestor) + any horizontal table scrollers
+    const sc = this._scroller();
+    const scTop = sc ? sc.scrollTop : null;
+    const hScrolls = this.shadowRoot ? [...this.shadowRoot.querySelectorAll('.scroll')].map(el => el.scrollLeft) : [];
     this._hasData = true;
     const E = (s) => this._esc(s);
     const comp = (data.header && data.header.competitions && data.header.competitions[0]) || {};
@@ -149,38 +193,41 @@ class TtGameCard extends HTMLElement {
       ? [stType.detail || stType.shortDetail || 'Live', status.displayClock ? `Q${status.period} · ${status.displayClock}` : ''].filter(Boolean).join(' — ')
       : (stType.detail || stType.shortDetail || '');
     const liveDot = state === 'in' ? '<span class="live">● LIVE</span> ' : '';
+    const league = (this._cfg.league_path || '').toLowerCase();
+    const isBaseball = league.includes('mlb') || league.includes('baseball');
+    const isBasketball = league.includes('nba') || league.includes('basketball');
+
     let h = `<div class="wrap">`;
     h += `<div class="hd">
       <div class="side"><img src="${E(logoOf(away))}" alt=""><div class="nm">${E(teamOf(away).displayName || '')}</div><div class="rec">${E(recOf(away))}</div><div class="sc">${E(away.score ?? '')}</div></div>
       <div class="mid"><div class="st">${liveDot}${E(clockLine)}</div><div class="vs">${state === 'pre' ? 'vs' : ''}</div></div>
       <div class="side"><img src="${E(logoOf(home))}" alt=""><div class="nm">${E(teamOf(home).displayName || '')}</div><div class="rec">${E(recOf(home))}</div><div class="sc">${E(home.score ?? '')}</div></div>
     </div>`;
-    // Linescore table
-    const ls = (c) => c.linescores || [];
-    if (ls(away).length || ls(home).length) {
-      const n = Math.max(ls(away).length, ls(home).length);
-      const league = (this._cfg.league_path || '').toLowerCase();
-      const isBaseball = league.includes('mlb') || league.includes('baseball');
-      const heads = [];
-      for (let i = 0; i < n; i++) {
-        const lbl = (ls(away)[i] && ls(away)[i].label) || (ls(home)[i] && ls(home)[i].label) || (isBaseball ? String(i + 1) : (i < 4 ? 'Q' + (i + 1) : 'OT' + (i > 4 ? i - 3 : '')));
-        heads.push(lbl);
+    const tabs = [['summary', 'Summary'], ['stats', 'Team Stats'], ['players', 'Players'], ['plays', 'Plays']];
+    h += `<div class="tabs">${tabs.map(t => `<button class="tab${this._tab === t[0] ? ' on' : ''}" data-tab="${t[0]}">${t[1]}</button>`).join('')}</div>`;
+    h += `<div class="panel">`;
+
+    if (this._tab === 'summary') {
+      const ls = (c) => c.linescores || [];
+      if (ls(away).length || ls(home).length) {
+        const n = Math.max(ls(away).length, ls(home).length);
+        const heads = [];
+        for (let i = 0; i < n; i++) {
+          heads.push((ls(away)[i] && ls(away)[i].label) || (ls(home)[i] && ls(home)[i].label) || (isBaseball ? String(i + 1) : (i < 4 ? 'Q' + (i + 1) : 'OT' + (i > 4 ? i - 3 : ''))));
+        }
+        const rhe = (c) => {
+          const t = (data.boxscore && data.boxscore.teams || []).find(x => x.team && x.team.id === teamOf(c).id);
+          const get = (nm) => { const s = t && (t.statistics || []).find(x => x.name === nm); return s ? s.displayValue : ''; };
+          return { r: c.score ?? '', hits: c.hits ?? get('hits'), err: c.errors ?? get('errors') };
+        };
+        h += `<div class="sec">Scoring</div><table class="tbl ls"><tr><th class="lft">Team</th>${heads.map(x => `<th>${E(x)}</th>`).join('')}<th class="tot">T</th>${isBaseball ? '<th class="tot">R</th><th>H</th><th>E</th>' : ''}</tr>`;
+        for (const c of [away, home]) {
+          const cells = []; for (let i = 0; i < n; i++) cells.push(ls(c)[i] ? ls(c)[i].displayValue : '–');
+          const e = rhe(c);
+          h += `<tr><td class="lft"><img class="mini" src="${E(logoOf(c))}" alt=""> ${E(teamOf(c).abbreviation || '')}</td>${cells.map(x => `<td>${E(x)}</td>`).join('')}<td class="tot">${E(c.score ?? '')}</td>${isBaseball ? `<td class="tot">${E(e.r)}</td><td>${E(e.hits)}</td><td>${E(e.err)}</td>` : ''}</tr>`;
+        }
+        h += `</table>`;
       }
-      const rhe = (c) => {
-        const t = (data.boxscore && data.boxscore.teams || []).find(x => x.team && x.team.id === teamOf(c).id);
-        const get = (nm) => { const s = t && (t.statistics || []).find(x => x.name === nm); return s ? s.displayValue : ''; };
-        return { r: c.score ?? '', hits: c.hits ?? get('hits'), err: c.errors ?? get('errors') };
-      };
-      h += `<div class="sec">Scoring</div><table class="tbl ls"><tr><th class="lft">Team</th>${heads.map(x => `<th>${E(x)}</th>`).join('')}<th class="tot">T</th>${isBaseball ? '<th class="tot">R</th><th>H</th><th>E</th>' : ''}</tr>`;
-      for (const c of [away, home]) {
-        const cells = []; for (let i = 0; i < n; i++) cells.push(ls(c)[i] ? ls(c)[i].displayValue : '–');
-        const e = rhe(c);
-        h += `<tr><td class="lft"><img class="mini" src="${E(logoOf(c))}" alt=""> ${E(teamOf(c).abbreviation || '')}</td>${cells.map(x => `<td>${E(x)}</td>`).join('')}<td class="tot">${E(c.score ?? '')}</td>${isBaseball ? `<td class="tot">${E(e.r)}</td><td>${E(e.hits)}</td><td>${E(e.err)}</td>` : ''}</tr>`;
-      }
-      h += `</table>`;
-    }
-    // Game info for pre-game
-    if (state === 'pre') {
       const venue = data.gameInfo && data.gameInfo.venue ? data.gameInfo.venue.fullName : '';
       const addr = data.gameInfo && data.gameInfo.venue && data.gameInfo.venue.address ? [data.gameInfo.venue.address.city, data.gameInfo.venue.address.state].filter(Boolean).join(', ') : '';
       const tv = (data.broadcasts || []).map(b => (b.names || []).join('/')).filter(Boolean).join(', ');
@@ -190,71 +237,134 @@ class TtGameCard extends HTMLElement {
       if (tv) rows.push(['TV', tv]);
       if (odds && odds.details) rows.push(['Line', odds.details + (odds.overUnder ? ` · O/U ${odds.overUnder}` : '')]);
       if (rows.length) h += `<div class="sec">Game Info</div><table class="tbl kv">${rows.map(r => `<tr><td class="lft k">${E(r[0])}</td><td class="lft">${E(r[1])}</td></tr>`).join('')}</table>`;
-      h += `<div class="note">Full box score and stats appear here once the game starts. This popup refreshes itself every 15 seconds during the game.</div>`;
+      if (state === 'pre') h += `<div class="note">Full box score and stats appear here once the game starts. This popup refreshes itself every 15 seconds during the game.</div>`;
+      const leaders = data.leaders || [];
+      const leaderRows = [];
+      leaders.forEach(entry => {
+        const tab = entry.team ? entry.team.abbreviation : '';
+        (entry.leaders || []).forEach(cat => {
+          const top = (cat.leaders || [])[0];
+          if (top && top.athlete) leaderRows.push([tab, cat.displayName || cat.name || '', top.athlete.displayName || '', top.displayValue || '']);
+        });
+      });
+      if (leaderRows.length) {
+        h += `<div class="sec">Game Leaders</div><table class="tbl kv">${leaderRows.map(r => `<tr><td class="lft k">${E(r[0])}</td><td class="lft">${E(r[1])}</td><td class="lft b">${E(r[2])}</td><td class="rgt">${E(r[3])}</td></tr>`).join('')}</table>`;
+      }
+      if (!rows.length && !leaderRows.length && state !== 'pre') h += `<div class="note">Game details will appear here as they become available.</div>`;
     }
-    // Team statistics
-    const bt = (data.boxscore && data.boxscore.teams) || [];
-    if (bt.length === 2) {
-      const byId = {}; bt.forEach(t => { byId[t.team.id] = t; });
-      const A = byId[teamOf(away).id], H = byId[teamOf(home).id];
-      if (A && H) {
-        const labels = [];
-        (A.statistics || []).forEach(s => { if (!labels.find(l => l.name === s.name)) labels.push({ name: s.name, label: s.label || s.name }); });
-        (H.statistics || []).forEach(s => { if (!labels.find(l => l.name === s.name)) labels.push({ name: s.name, label: s.label || s.name }); });
-        const val = (t, nm) => { const s = (t.statistics || []).find(x => x.name === nm); return s ? s.displayValue : '–'; };
-        if (labels.length) {
-          h += `<div class="sec">Team Stats</div><table class="tbl ts"><tr><th class="lft">${E(teamOf(away).abbreviation || 'AWAY')}</th><th></th><th class="rgt">${E(teamOf(home).abbreviation || 'HOME')}</th></tr>`;
-          labels.slice(0, 22).forEach(l => { h += `<tr><td class="lft b">${E(val(A, l.name))}</td><td class="lab">${E(l.label)}</td><td class="rgt b">${E(val(H, l.name))}</td></tr>`; });
-          h += `</table>`;
+
+    if (this._tab === 'stats') {
+      let built = '';
+      if (isBaseball && state === 'pre') { built = ''; }
+      else if (isBaseball) {
+        const groups = (data.boxscore && data.boxscore.players) || [];
+        const tot = (c, type, label) => {
+          const g = groups.find(x => x.team && x.team.id === teamOf(c).id);
+          const cat = g && (g.statistics || []).find(s => (s.type || s.name) === type);
+          if (!cat) return '–';
+          const i = (cat.labels || []).indexOf(label);
+          return i >= 0 && cat.totals ? (cat.totals[i] ?? '–') : '–';
+        };
+        const rowsB = [['Runs', away.score ?? '', home.score ?? ''], ['Hits', away.hits ?? '', home.hits ?? ''], ['Errors', away.errors ?? '', home.errors ?? ''],
+          ['Home Runs', tot(away, 'batting', 'HR'), tot(home, 'batting', 'HR')], ['RBIs', tot(away, 'batting', 'RBI'), tot(home, 'batting', 'RBI')],
+          ['Walks (batting)', tot(away, 'batting', 'BB'), tot(home, 'batting', 'BB')], ['Strikeouts (batting)', tot(away, 'batting', 'K'), tot(home, 'batting', 'K')],
+          ['Pitching Strikeouts', tot(away, 'pitching', 'K'), tot(home, 'pitching', 'K')], ['Pitching Walks', tot(away, 'pitching', 'BB'), tot(home, 'pitching', 'BB')]];
+        built = `<table class="tbl ts"><tr><th class="lft">${E(teamOf(away).abbreviation || 'AWAY')}</th><th></th><th class="rgt">${E(teamOf(home).abbreviation || 'HOME')}</th></tr>` +
+          rowsB.map(r => `<tr><td class="lft b">${E(r[1])}</td><td class="lab">${E(r[0])}</td><td class="rgt b">${E(r[2])}</td></tr>`).join('') + `</table>`;
+      } else {
+        const bt = (data.boxscore && data.boxscore.teams) || [];
+        if (bt.length === 2) {
+          const byId = {}; bt.forEach(t => { byId[t.team.id] = t; });
+          const A = byId[teamOf(away).id], H = byId[teamOf(home).id];
+          if (A && H) {
+            const labels = [];
+            (A.statistics || []).forEach(s => { if (s.displayValue !== undefined && !labels.find(l => l.name === s.name)) labels.push({ name: s.name, label: s.label || s.name }); });
+            (H.statistics || []).forEach(s => { if (s.displayValue !== undefined && !labels.find(l => l.name === s.name)) labels.push({ name: s.name, label: s.label || s.name }); });
+            const val = (t, nm) => { const s = (t.statistics || []).find(x => x.name === nm); return s ? s.displayValue : '–'; };
+            if (labels.length) {
+              built = `<table class="tbl ts"><tr><th class="lft">${E(teamOf(away).abbreviation || 'AWAY')}</th><th></th><th class="rgt">${E(teamOf(home).abbreviation || 'HOME')}</th></tr>` +
+                labels.slice(0, 24).map(l => `<tr><td class="lft b">${E(val(A, l.name))}</td><td class="lab">${E(l.label)}</td><td class="rgt b">${E(val(H, l.name))}</td></tr>`).join('') + `</table>`;
+            }
+          }
         }
       }
+      h += built ? `<div class="sec">${state === 'pre' ? 'Season Averages' : 'Team Stats'}</div>${built}` : `<div class="note">Team statistics appear here once the game is underway.</div>`;
     }
-    // Leaders
-    const leaders = data.leaders || [];
-    const leaderRows = [];
-    leaders.forEach(entry => {
-      const tab = entry.team ? entry.team.abbreviation : '';
-      (entry.leaders || []).forEach(cat => {
-        const top = (cat.leaders || [])[0];
-        if (top && top.athlete) leaderRows.push([tab, cat.displayName || cat.name || '', top.athlete.displayName || '', top.displayValue || '']);
-      });
-    });
-    if (leaderRows.length) {
-      h += `<div class="sec">Game Leaders</div><table class="tbl kv">${leaderRows.map(r => `<tr><td class="lft k">${E(r[0])}</td><td class="lft">${E(r[1])}</td><td class="lft b">${E(r[2])}</td><td class="rgt">${E(r[3])}</td></tr>`).join('')}</table>`;
-    }
-    // Player box score
-    const players = (data.boxscore && data.boxscore.players) || [];
-    const catTitle = (nm) => ({ passing: 'Passing', rushing: 'Rushing', receiving: 'Receiving', fumbles: 'Fumbles', defensive: 'Defense', interceptions: 'Interceptions', kicking: 'Kicking', punting: 'Punting', kickReturns: 'Kick Returns', puntReturns: 'Punt Returns', batting: 'Batting', pitching: 'Pitching', boxscore: 'Box Score', scoring: 'Scoring' }[nm] || (nm ? nm.charAt(0).toUpperCase() + nm.slice(1) : 'Stats'));
-    players.forEach(group => {
-      const t = group.team || {};
-      (group.statistics || []).forEach(cat => {
-        const athletes = cat.athletes || [];
-        if (!athletes.length) return;
-        const labels = cat.labels || [];
-        h += `<div class="sec">${E(t.displayName || t.abbreviation || '')} — ${E(catTitle(cat.name))}</div>`;
-        h += `<div class="scroll"><table class="tbl ps"><tr><th class="lft">Player</th>${labels.map(l => `<th>${E(l)}</th>`).join('')}</tr>`;
-        athletes.forEach(a => {
-          const nm = (a.athlete && (a.athlete.displayName || a.athlete.shortName)) || '';
-          const stats = a.stats || [];
-          if (!stats.length) { h += `<tr><td class="lft">${E(nm)}</td><td colspan="${labels.length}" class="lft dim">Did not play</td></tr>`; return; }
-          h += `<tr><td class="lft nm2">${E(nm)}${a.starter ? ' •' : ''}</td>${labels.map((l, i) => `<td>${E(stats[i] ?? '')}</td>`).join('')}</tr>`;
+
+    if (this._tab === 'players') {
+      const players = (data.boxscore && data.boxscore.players) || [];
+      const catTitle = (nm) => ({ passing: 'Passing', rushing: 'Rushing', receiving: 'Receiving', fumbles: 'Fumbles', defensive: 'Defense', interceptions: 'Interceptions', kicking: 'Kicking', punting: 'Punting', kickReturns: 'Kick Returns', puntReturns: 'Punt Returns', batting: 'Batting', pitching: 'Pitching', boxscore: 'Box Score', scoring: 'Scoring' }[nm] || (nm ? nm.charAt(0).toUpperCase() + nm.slice(1) : 'Stats'));
+      let any = false;
+      players.forEach(group => {
+        const t = group.team || {};
+        (group.statistics || []).forEach(cat => {
+          const athletes = cat.athletes || [];
+          if (!athletes.length) return;
+          any = true;
+          const labels = cat.labels || [];
+          h += `<div class="sec">${E(t.displayName || t.abbreviation || '')} — ${E(cat.name || cat.type ? catTitle(cat.name || cat.type) : ((cat.labels || [])[0] === 'MIN' ? 'Box Score' : 'Statistics'))}</div>`;
+          h += `<div class="scroll"><table class="tbl ps"><tr><th class="lft">Player</th>${labels.map(l => `<th>${E(l)}</th>`).join('')}</tr>`;
+          athletes.forEach(a => {
+            const nm = (a.athlete && (a.athlete.displayName || a.athlete.shortName)) || '';
+            const stats = a.stats || [];
+            if (!stats.length) { h += `<tr><td class="lft">${E(nm)}</td><td colspan="${Math.max(labels.length, 1)}" class="lft dim">Did not play</td></tr>`; return; }
+            h += `<tr><td class="lft nm2">${E(nm)}${a.starter ? ' •' : ''}</td>${labels.map((l, i) => `<td>${E(stats[i] ?? '')}</td>`).join('')}</tr>`;
+          });
+          if (cat.totals && cat.totals.length) h += `<tr class="totrow"><td class="lft">Total</td>${labels.map((l, i) => `<td>${E(cat.totals[i] ?? '')}</td>`).join('')}</tr>`;
+          h += `</table></div>`;
         });
-        h += `</table></div>`;
       });
-    });
-    // Scoring plays (NFL/MLB sized lists only)
-    const sp = data.scoringPlays || [];
-    const league2 = (this._cfg.league_path || '').toLowerCase();
-    if (sp.length && !league2.includes('nba') && !league2.includes('basketball')) {
-      h += `<div class="sec">Scoring Plays</div><table class="tbl kv">${sp.map(p => {
-        const per = p.period ? (league2.includes('mlb') || league2.includes('baseball') ? 'Inn ' + p.period.number : 'Q' + p.period.number) : '';
-        const clk = p.clock && p.clock.displayValue ? p.clock.displayValue : '';
-        return `<tr><td class="lft k">${E([per, clk].filter(Boolean).join(' '))}</td><td class="lft">${E(p.text || '')}</td><td class="rgt b">${E(p.awayScore ?? '')}–${E(p.homeScore ?? '')}</td></tr>`;
-      }).join('')}</table>`;
+      if (!any) h += `<div class="note">Player box scores appear here once the game is underway.</div>`;
     }
+
+    if (this._tab === 'plays') {
+      const pbp = (data.plays || []).filter(p => { const t = p.text || p.shortDescription || ''; return t && t !== 'None' && !t.startsWith('Pitch '); });
+      const scoring = data.scoringPlays || [];
+      if (pbp.length) {
+        const scoringOnly = pbp.filter(p => p.scoringPlay);
+        if (scoringOnly.length) {
+          h += `<div class="sec">Scoring Plays</div><table class="tbl kv spt">${scoringOnly.map(p => {
+            const per = p.period ? (p.period.displayValue || '') : '';
+            const clk = p.clock && p.clock.displayValue ? p.clock.displayValue : '';
+            return `<tr><td class="lft k">${E([per, clk].filter(Boolean).join(' '))}</td><td class="lft">${E(p.text || p.shortDescription || '')}</td><td class="rgt b">${E(p.awayScore ?? '')}–${E(p.homeScore ?? '')}</td></tr>`;
+          }).join('')}</table>`;
+        }
+        const cap = isBaseball ? 300 : 120;
+        const list = pbp.slice(-cap).reverse();
+        h += `<div class="sec">Play-by-Play</div><div class="note2">Most recent first · scoring plays highlighted</div>`;
+        list.forEach(p => {
+          const per = p.period ? (p.period.displayValue || '') : '';
+          const clk = p.clock && p.clock.displayValue ? p.clock.displayValue : '';
+          const when = [per, clk].filter(Boolean).join(' · ');
+          const txt = p.text || p.shortDescription || '';
+          const score = (p.awayScore !== undefined && p.homeScore !== undefined) ? `${p.awayScore}–${p.homeScore}` : '';
+          h += `<div class="pl${p.scoringPlay ? ' sc' : ''}"><div class="plw">${E(when)}</div><div class="plt">${E(txt)}</div>${p.scoringPlay ? `<div class="pls">${E(score)}</div>` : ''}</div>`;
+        });
+      } else if (scoring.length) {
+        h += `<div class="sec">Scoring Plays</div><table class="tbl kv spt">${scoring.map(p => {
+          const per = p.period ? (isBaseball ? 'Inn ' + p.period.number : 'Q' + p.period.number) : '';
+          const clk = p.clock && p.clock.displayValue ? p.clock.displayValue : '';
+          return `<tr><td class="lft k">${E([per, clk].filter(Boolean).join(' '))}</td><td class="lft">${E(p.text || '')}</td><td class="rgt b">${E(p.awayScore ?? '')}–${E(p.homeScore ?? '')}</td></tr>`;
+        }).join('')}</table>`;
+        const drives = data.drives && data.drives.previous ? data.drives.previous.slice().reverse() : [];
+        if (drives.length) {
+          h += `<div class="sec">Drive Summary</div>` + drives.slice(0, 16).map(d =>
+            `<div class="pl"><div class="plt">${E(d.description || '')}</div><div class="pls2">${E(d.result || '')}</div></div>`).join('');
+        }
+      } else {
+        h += `<div class="note">Play-by-play isn't available for this game yet — scoring plays and key events will show up here once ESPN publishes them, usually right after the game starts.</div>`;
+      }
+    }
+
     h += `<div class="foot">Data: ESPN · ${state === 'in' ? 'auto-refreshing every 15s · ' : ''}updated ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', second: '2-digit' })} PT</div>`;
-    h += `</div>`;
+    h += `</div></div>`;
     this.shadowRoot.innerHTML = `<style>${TtGameCard.CSS}</style>${h}`;
+    // Restore scroll positions after the DOM swap
+    if (sc && scTop !== null) requestAnimationFrame(() => { try { sc.scrollTop = scTop; } catch (e) {} });
+    if (hScrolls.length) {
+      const now = this.shadowRoot.querySelectorAll('.scroll');
+      hScrolls.forEach((v, i) => { if (now[i]) now[i].scrollLeft = v; });
+    }
   }
 }
 TtGameCard.CSS = `
@@ -271,6 +381,9 @@ TtGameCard.CSS = `
   .st { font-size: 12px; color: #8fb0d8; line-height: 1.35; }
   .live { color: #ff5d5d; font-weight: 700; }
   .vs { font-size: 15px; color: #647d9e; font-weight: 700; }
+  .tabs { display: flex; gap: 6px; margin: 14px 0 2px; }
+  .tab { flex: 1 1 0; appearance: none; -webkit-appearance: none; border: 1px solid rgba(45,212,191,.22); background: rgba(45,212,191,.07); color: #8fb0d8; font-size: 12.5px; font-weight: 700; padding: 9px 2px; border-radius: 10px; cursor: pointer; font-family: inherit; }
+  .tab.on { background: #2dd4bf; border-color: #2dd4bf; color: #052e2b; }
   .sec { margin: 16px 0 6px; font-size: 12px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: #2dd4bf; }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .tbl th { color: #647d9e; font-weight: 600; font-size: 11px; padding: 4px 5px; text-align: center; border-bottom: 1px solid rgba(45,212,191,.25); }
@@ -282,9 +395,19 @@ TtGameCard.CSS = `
   .tbl .k { color: #8fb0d8; white-space: nowrap; width: 1%; }
   .tbl .nm2 { white-space: nowrap; font-weight: 600; color: #fff; }
   .tbl .dim { color: #647d9e; }
+  .tbl .totrow td { font-weight: 700; color: #fff; border-top: 1px solid rgba(45,212,191,.35); }
   .mini { width: 16px; height: 16px; vertical-align: -3px; object-fit: contain; }
   .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .note { margin-top: 12px; font-size: 12px; color: #8fb0d8; text-align: center; }
+  .note { margin-top: 14px; font-size: 12.5px; color: #8fb0d8; text-align: center; line-height: 1.5; padding: 0 6px; }
+  .note2 { font-size: 11px; color: #647d9e; margin: -2px 0 6px; }
+  .pl { display: flex; gap: 8px; align-items: baseline; padding: 6px 4px; border-bottom: 1px solid rgba(143,176,216,.10); }
+  .pl.sc { background: rgba(45,212,191,.06); border-left: 3px solid #2dd4bf; padding-left: 6px; }
+  .plw { flex: 0 0 74px; font-size: 10.5px; color: #647d9e; line-height: 1.3; }
+  .plt { flex: 1; font-size: 12.5px; color: #dbe7f5; line-height: 1.4; min-width: 0; }
+  .pl.sc .plt { color: #fff; font-weight: 600; }
+  .pls { flex: none; font-size: 12px; font-weight: 800; color: #2dd4bf; }
+  .pls2 { flex: none; font-size: 11px; font-weight: 700; color: #8fb0d8; text-transform: uppercase; }
+  .tbl.spt td.rgt { white-space: nowrap; }
   .foot { margin-top: 14px; font-size: 10.5px; color: #647d9e; text-align: center; }
 `;
 if (!customElements.get('tt-game-card')) customElements.define('tt-game-card', TtGameCard);
