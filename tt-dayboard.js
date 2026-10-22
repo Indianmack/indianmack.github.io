@@ -1,15 +1,15 @@
-/* tt-dayboard-card — Kumar Home Sports tab: Yesterday | Today | Tomorrow per league.
+/* tt-dayboard-final — FINAL CANDIDATE (mobile polish, queue task_50de17a2). NOT LIVE.
+ * Polish v2: 'Final' centered under the score, records smaller/dimmer, loser names
+ * dimmer, more air around logos/names/scores, team names 16px, tighter rows.
+ * Today now renders from ESPN like Yesterday/Tomorrow so all three tabs share one
+ * row style (config today_card is ignored); ESPN panels refresh every minute so
+ * live games stay current. Tabs, swipe, popup contract: unchanged.
  *
- * Today is the existing custom:ha-teamtracker-scoreboard-card nested verbatim
- * (Team Tracker sensors, live polling, sorting and popups completely untouched).
- * Yesterday and Tomorrow are rendered from ESPN's free date-based scoreboard API
+ * All three days are rendered from ESPN's free date-based scoreboard API
  * (the per-team sensors each hold only one event, so they cannot build complete
  * day slates). ESPN rows reuse the exact .game-row markup and the
  * data-ev / data-sp / data-lp / data-title contract, so the existing
  * tt-game-card popup (gamecard-append.js, browser_mod) opens them unchanged.
- *
- * If today_card is omitted from the config, Today is also rendered from ESPN
- * (standalone test / fallback mode).
  *
  * Config:
  *   type: custom:tt-dayboard-card
@@ -18,7 +18,7 @@
  *   league_path: nba                 (ESPN path segment)
  *   colors: { ... }                  (same color object as the scoreboard card)
  *   special_teams: [lal]             (lowercase ESPN abbreviations)
- *   today_card: { ... }              (full ha-teamtracker-scoreboard-card config)
+ *   today_card: (ignored in this design; kept in configs for rollback)
  */
 (() => {
   'use strict';
@@ -95,7 +95,8 @@
       align-items: center;
       flex-wrap: wrap;
       height: auto;
-      padding: 8px 2px;
+      padding: 6px 3px;
+      column-gap: 2px;
       border-bottom: 1px solid var(--divider-color, rgba(255, 255, 255, 0.05));
       position: relative;
       cursor: pointer;
@@ -111,19 +112,20 @@
       justify-content: center;
       padding: 0;
     }
-    .team-col-a { text-align: right; }
-    .team-col-b { text-align: left; }
+    .team-col-a { text-align: right; padding-right: 3px; }
+    .team-col-b { text-align: left; padding-left: 3px; }
     .team-name {
-      font-size: 15px;
+      font-size: 16px;
       font-weight: 600;
-      letter-spacing: -0.2px;
+      letter-spacing: -0.4px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       line-height: 1.2;
     }
-    .team-rank { font-size: 11px; line-height: 1.2; white-space: nowrap; overflow: hidden; }
-    .logo { flex: none; width: 20px; min-width: 20px; display: flex; align-items: center; justify-content: center; }
+    .team-name.fit { font-size: 14.5px; }
+    .team-rank { font-size: 10px; line-height: 1.2; white-space: nowrap; overflow: hidden; }
+    .logo { flex: none; width: 20px; min-width: 20px; margin: 0 3px; display: flex; align-items: center; justify-content: center; }
     .logo img { width: 20px; height: 20px; object-fit: contain; display: block; }
     .score {
       flex: none;
@@ -140,8 +142,8 @@
     .score-b { justify-content: flex-start; }
     .colon {
       flex: none;
-      width: 10px;
-      min-width: 10px;
+      width: 9px;
+      min-width: 9px;
       font-size: 15px;
       font-weight: bold;
       text-align: center;
@@ -166,7 +168,7 @@
     }
     .message > span:first-child { flex: none; }
     .msg-sub { font-size: 11px; font-weight: normal; color: #7d94b5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .tv { position: absolute; top: 8px; right: 0; font-size: 0; }
+    .message .tv-badge { margin-left: auto; flex: none; }
     .tv-badge {
       font-size: 8px;
       font-weight: bold;
@@ -177,7 +179,17 @@
       background: rgba(102, 102, 102, 0.75);
     }
     .tv-badge.live { background: rgba(255, 93, 93, 0.75); }
-    .game-row:has(.tv) .team-col-b { padding-right: 34px; }
+    .final-line {
+      flex: 1 1 100%;
+      order: 9;
+      text-align: center;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      color: #647d9e;
+      margin-top: 2px;
+      line-height: 1.1;
+    }
     .empty { padding: 10px 4px; font-size: 13px; font-style: italic; color: #8fb0d8; }
   `;
   class TtDayboardCard extends HTMLElement {
@@ -203,7 +215,7 @@
       this._colors = Object.assign({
         name_default: '#a9bcd6', name_leading: '#eef4fb', name_winner: '#eef4fb',
         name_special: '#60a5fa', score_leading: '#2dd4bf', score_winner: '#eef4fb',
-        score_loser: '#647d9e', live: '#ff5d5d'
+        score_loser: '#647d9e', live: '#ff5d5d', name_loser: '#7d94b5'
       }, cfg.colors || {});
       this._special = (cfg.special_teams || []).map(s => String(s).toLowerCase());
       this._build();
@@ -225,9 +237,9 @@
     }
 
     _tick() {
-      // Roll over at Pacific midnight; otherwise refresh every 10 minutes.
-      this._tickCount = (this._tickCount || 0) + 1;
-      if (this._fetchDate !== ptDate(0) || this._tickCount % 10 === 0) this._fetchAll();
+      // Runs every 60s: refetch so live games stay current (this also rolls
+      // the panels over automatically at Pacific midnight).
+      this._fetchAll();
     }
 
     _build() {
@@ -265,24 +277,12 @@
         }
       }, { passive: true });
 
-      // Today panel: nest the existing scoreboard card verbatim, with its own
-      // card chrome stripped (this card provides the chrome) — or render Today
-      // from ESPN when no today_card was configured (test / fallback mode).
+      // Today panel: rendered from ESPN by _renderPanel, exactly like
+      // Yesterday/Tomorrow, so all three tabs share one row style. (In this
+      // final design the config's today_card is intentionally not nested.)
       const todayPanel = root.querySelector('[data-panel="0"]');
       this._board = null;
-      if (this._config.today_card) {
-        const nested = JSON.parse(JSON.stringify(this._config.today_card));
-        if (nested.card_mod && nested.card_mod.style) {
-          nested.card_mod.style += '\n ha-card { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; border-radius: 0 !important; }';
-        }
-        const el = document.createElement('ha-teamtracker-scoreboard-card');
-        el.setConfig(nested);
-        if (this._hass) el.hass = this._hass;
-        todayPanel.appendChild(el);
-        this._board = el;
-      } else {
-        todayPanel.innerHTML = '<div class="empty">Loading…</div>';
-      }
+      todayPanel.innerHTML = '<div class="empty">Loading…</div>';
     }
     _setDay(d) {
       d = Math.max(-1, Math.min(1, d));
@@ -297,7 +297,7 @@
 
     async _fetchAll() {
       this._fetchDate = ptDate(0);
-      const offsets = this._config.today_card ? [-1, 1] : [-1, 0, 1];
+      const offsets = [-1, 0, 1];
       await Promise.all(offsets.map(o => this._fetchDay(o)));
     }
 
@@ -318,7 +318,6 @@
     }
 
     _renderPanel(offset) {
-      if (offset === 0 && this._config.today_card) return; // nested board owns Today
       const panel = this.shadowRoot.querySelector('[data-panel="' + offset + '"]');
       if (!panel) return;
       const events = this._events[offset];
@@ -386,15 +385,17 @@
         let scoreColor = '#000';
         if (state === 'post') {
           if (c.winner) { nameColor = C.name_winner; scoreColor = C.score_winner; }
-          else { scoreColor = C.score_loser; }
+          else { nameColor = C.name_loser; scoreColor = C.score_loser; }
         } else if (state === 'in') {
           const lead = parseFloat(c.score || 0) > parseFloat(opp.score || 0);
           if (lead) { nameColor = C.name_leading; scoreColor = C.score_leading; }
           else { scoreColor = '#eef4fb'; }
         }
         if (isSpecial) nameColor = C.name_special;
+        const nm = team.shortDisplayName || team.name || team.displayName || '';
         return {
-          name: team.shortDisplayName || team.name || team.displayName || '',
+          name: nm,
+          nameCls: nm.length >= 12 ? 'team-name fit' : 'team-name',
           rank: this._record(c),
           logo: team.logo || '',
           score: state === 'pre' ? '' : (c.score != null ? String(c.score) : ''),
@@ -405,49 +406,50 @@
       const A = side(away, home);
       const liveBg = state === 'in' ? ' live-bg' : '';
 
-      let message = '';
+      // Network badge rides at the right end of the message line (not the row
+      // corner), so it never eats into the away team's name column.
+      let badgeHtml = '';
+      if (state === 'pre' || state === 'in') {
+        const nets = this._broadcasts(comp);
+        if (nets.length) {
+          // Badge text is the first network cut to 4 chars, with a '>' marker
+          // when truncated or multi-network (full list in title).
+          const badge = nets[0].substring(0, 4) + ((nets[0].length > 4 || nets.length > 1) ? '>' : '');
+          badgeHtml = '<span class="tv-badge' + (state === 'in' ? ' live' : '')
+            + '" title="' + esc(nets.join(' · ')) + '">' + esc(badge) + '</span>';
+        }
+      }
+
+      let msgHtml = '';
       if (state === 'pre') {
         const bits = [];
         const city = comp.venue && comp.venue.address ? comp.venue.address.city : '';
         if (city) bits.push(city);
         const odds = comp.odds && comp.odds[0] ? comp.odds[0].summary : '';
         if (odds) bits.push(odds);
-        message = '<span style="color:#8fb0d8">' + esc((dayLabel ? dayLabel + ' · ' : '') + fmtTime(ev.date)) + '</span>'
-          + (bits.length ? '<span class="msg-sub">' + esc(bits.join(', ')) + '</span>' : '');
+        msgHtml = '<div class="message"><span style="color:#8fb0d8">' + esc((dayLabel ? dayLabel + ' · ' : '') + fmtTime(ev.date)) + '</span>'
+          + (bits.length ? '<span class="msg-sub">' + esc(bits.join(', ')) + '</span>' : '') + badgeHtml + '</div>';
       } else if (state === 'in') {
-        message = '<span style="color:' + C.live + '">' + esc(st.shortDetail || st.detail || 'Live') + '</span>';
+        msgHtml = '<div class="message"><span style="color:' + C.live + '">' + esc(st.shortDetail || st.detail || 'Live') + '</span>' + badgeHtml + '</div>';
       } else {
         const note = (comp.notes || []).find(n => n.headline);
-        message = '<span style="color:' + C.score_winner + '">' + esc(st.shortDetail || st.detail || 'Final') + '</span>'
-          + (note ? '<span class="msg-sub">' + esc(note.headline) + '</span>' : '');
-      }
-
-      let tv = '';
-      if (state === 'pre' || state === 'in') {
-        const nets = this._broadcasts(comp);
-        if (nets.length) {
-          // Mirror the bundle: badge text is the first network cut to 4 chars,
-          // with a '>' marker when truncated or multi-network (full list in title).
-          const badge = nets[0].substring(0, 4) + ((nets[0].length > 4 || nets.length > 1) ? '>' : '');
-          tv = '<div class="tv"><span class="tv-badge' + (state === 'in' ? ' live' : '')
-            + '" title="' + esc(nets.join(' · ')) + '">' + esc(badge) + '</span></div>';
-        }
+        msgHtml = '<div class="final-line">' + esc(st.shortDetail || st.detail || 'Final')
+          + (note ? ' · ' + esc(note.headline) : '') + '</div>';
       }
 
       const title = String(ev.name || 'Game Details').replace(/"/g, '');
       return '<div class="game-row" data-ev="' + esc(ev.id) + '" data-sp="' + esc(this._config.sport_path)
         + '" data-lp="' + esc(this._config.league_path) + '" data-title="' + esc(title) + '">'
-        + '<div class="team-col team-col-a"><div class="team-name" style="color:' + H.nameColor + '">' + esc(H.name) + '</div>'
-        + '<div class="team-rank" style="color:' + C.name_default + '">' + esc(H.rank) + '</div></div>'
+        + '<div class="team-col team-col-a"><div class="' + H.nameCls + '" style="color:' + H.nameColor + '">' + esc(H.name) + '</div>'
+        + '<div class="team-rank" style="color:#647d9e">' + esc(H.rank) + '</div></div>'
         + '<div class="logo logo-a">' + (H.logo ? '<img src="' + esc(H.logo) + '" alt="">' : '') + '</div>'
         + '<div class="score score-a' + liveBg + '" style="color:' + H.scoreColor + '"><span class="score-value">' + esc(H.score) + '</span></div>'
         + '<div class="colon' + liveBg + '">–</div>'
         + '<div class="score score-b' + liveBg + '" style="color:' + A.scoreColor + '"><span class="score-value">' + esc(A.score) + '</span></div>'
         + '<div class="logo logo-b">' + (A.logo ? '<img src="' + esc(A.logo) + '" alt="">' : '') + '</div>'
-        + '<div class="team-col team-col-b"><div class="team-name" style="color:' + A.nameColor + '">' + esc(A.name) + '</div>'
-        + '<div class="team-rank" style="color:' + C.name_default + '">' + esc(A.rank) + '</div></div>'
-        + '<div class="message">' + message + '</div>'
-        + tv
+        + '<div class="team-col team-col-b"><div class="' + A.nameCls + '" style="color:' + A.nameColor + '">' + esc(A.name) + '</div>'
+        + '<div class="team-rank" style="color:#647d9e">' + esc(A.rank) + '</div></div>'
+        + msgHtml
         + '</div>';
     }
 
