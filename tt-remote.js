@@ -249,12 +249,16 @@
       // (the art switch mirrors the same TV data). The Apple TV only
       // ever contributes the app-name suffix, and only while it is
       // actually playing or paused.
+      // actually playing or paused. Art Mode outranks the media
+      // player's "off": the integration can report off while the
+      // panel is showing art (seen after a WebSocket power-off).
       const artOn = (tv && tv.attributes.art_mode_status === 'on')
         || (art ? art.state === 'on' : false);
       const aa = atv ? atv.attributes : {};
       const atvActive = !!(atv && (atv.state === 'playing' || atv.state === 'paused'));
-      const mode = (tvState === 'off' || tvState === 'standby') ? 'off'
-        : (artOn ? 'art' : 'watch');
+      const mode = artOn ? 'art'
+        : (tvState === 'off' || tvState === 'standby') ? 'off'
+        : 'watch';
       const stateText = mode === 'off' ? 'Off'
         : mode === 'art' ? 'Art Mode'
         : 'Watching' + (atvActive && aa.app_name ? ' · ' + aa.app_name : '');
@@ -376,7 +380,7 @@
         this._call('media_player', 'volume_mute', { is_volume_muted: !m }, { entity_id: ARC });
       });
       on('atvhome', () => this._call('script', 'turn_on', {}, { entity_id: HOME_SCRIPT }));
-      on('art', () => this._call('switch', 'toggle', {}, { entity_id: ART }));
+      on('art', () => this._call('switch', 'turn_on', {}, { entity_id: ART }));
       on('off', () => {
         if (!this._confirmOff) {
           this._confirmOff = true;
